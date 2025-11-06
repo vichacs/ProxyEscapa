@@ -3,171 +3,397 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Wi-Fi URL Checker (sin proxy)</title>
+<title>Wi-Fi URL Checker — directo + proxy</title>
 <style>
-body{font-family:system-ui,Segoe UI,Roboto,Arial;max-width:1100px;margin:18px auto;padding:12px;}
-textarea{width:100%;height:200px;font-family:monospace;margin-bottom:8px;}
-button{padding:8px 12px;margin-right:8px;}
-input[type=number]{padding:6px;margin-right:8px;width:80px;}
-ul{list-style:none;padding:0;margin:12px 0;}
-li{padding:8px;border-bottom:1px solid #eee;display:flex;align-items:center;gap:12px;}
-.url{flex:1;word-break:break-all;}
-.status.ok{color:green;font-weight:700;}
-.status.fail{color:#d00;font-weight:700;}
-.small{font-size:0.85rem;color:#666;}
+  body{font-family:system-ui,Segoe UI,Roboto,Arial;max-width:1100px;margin:18px auto;padding:12px;}
+  textarea{width:100%;height:200px;font-family:monospace;margin-bottom:8px;}
+  button{padding:8px 12px;margin-right:8px;}
+  label.small,input[type=number],select{font-size:0.9rem}
+  ul{list-style:none;padding:0;margin:12px 0;}
+  li{padding:8px;border-bottom:1px solid #eee;display:flex;align-items:center;gap:12px;}
+  .url{flex:1;word-break:break-all;}
+  .status.ok{color:green;font-weight:700;}
+  .status.proxy{color:teal;font-weight:700;}
+  .status.sec{color:orange;font-weight:700;}
+  .status.fail{color:#d00;font-weight:700;}
+  .small{font-size:0.85rem;color:#666;}
+  .controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;}
+  table{width:100%;border-collapse:collapse;margin-top:8px;}
+  th,td{border:1px solid #eee;padding:6px;text-align:left;font-size:0.9rem}
+  th{background:#f7f7f7}
 </style>
 </head>
 <body>
-<h2>Comprobador de URLs desde la red local</h2>
+<h2>Wi-Fi URL Checker — directo + proxy</h2>
 <p class="small">
-Verifica si cada enlace es accesible desde esta Wi-Fi (cafetería, aeropuerto, etc.).
-No usa proxies ni servidores, solo el navegador.  
-El código HTTP exacto no puede obtenerse (limitación de CORS), pero detecta si hay conexión o bloqueo.
+  Pega o carga un archivo (TXT/CSV). El comprobador intentará verificar accesibilidad <strong>desde esta red</strong> (directo) y opcionalmente vía proxy(s).  
+  Ideal para probar Wi-Fi de cafeterías, aeropuertos o colegios.  
+  (Si lo subes a GitHub Pages funcionará igual en el navegador del cliente).
 </p>
 
-<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+<div class="controls">
   <input type="file" id="fileInput" accept=".txt,.csv"/>
-  <button id="loadFile">Cargar archivo</button>
+  <button id="loadFile">Cargar</button>
   <button id="startBtn">Iniciar</button>
   <button id="stopBtn" disabled>Detener</button>
   <button id="exportBtn" disabled>Exportar CSV</button>
   <button id="clearBtn">Limpiar</button>
-  <label class="small">Timeout (ms): <input id="timeoutMs" type="number" value="10000" min="1000" step="500"/></label>
-  <label class="small">Concurrencia: <input id="concurrency" type="number" value="10" min="1" max="60"/></label>
+
+  <label class="small">Tiempo:
+    <select id="timeMode">
+      <option value="normal">Normal (6 s)</option>
+      <option value="advanced">Avanzado (15 s)</option>
+      <option value="custom">Personalizado</option>
+    </select>
+    <input id="customSecs" type="number" value="10" min="1" style="width:72px;display:none"/> s
+  </label>
+
+  <label class="small">Concurrencia:
+    <input id="concurrency" type="number" value="10" min="1" max="60" style="width:72px"/>
+  </label>
+
+  <label class="small"><input id="showBoth" type="checkbox" checked/> Mostrar ambos resultados (directo + proxy)</label>
+
+  <label class="small">Proxies:
+    <label><input type="checkbox" id="useAllOrigins" checked/> AllOrigins</label>
+    <label><input type="checkbox" id="useCorsproxy" /> corsproxy.io</label>
+  </label>
 </div>
 
-<textarea id="urlsArea" placeholder="Pega aquí tus URLs (una por línea) o carga un archivo .txt/.csv"></textarea>
+<div>
+  <textarea id="urlsArea" placeholder="Pega las URLs aquí (una por línea) o carga un CSV/TXT. Si el CSV tiene columnas, se usará la primera."></textarea>
+</div>
 
 <div id="summary" class="small" style="margin:8px 0;"></div>
-<ul id="list"></ul>
+
+<table id="resultsTable">
+  <thead>
+    <tr><th>#</th><th>URL</th><th>Directo</th><th>Proxy</th><th>Resultado final</th><th>Nota</th></tr>
+  </thead>
+  <tbody></tbody>
+</table>
 
 <script>
+/* ----------------- Helpers para parsear / UI ----------------- */
 function parseLines(text){
-  const urls = [];
   const lines = text.split(/\r?\n/);
+  const urls = [];
   for(let l of lines){
     l = l.trim();
     if(!l) continue;
     if(l.includes(',') || l.includes(';')){
       const p = l.split(/[,;]/)[0].replace(/^"|"$/g,'').trim();
-      if(p.startsWith('http')) urls.push(p);
-    } else if(l.startsWith('http')) urls.push(l);
+      if(p && (p.startsWith('http://') || p.startsWith('https://'))) urls.push(p);
+    } else if(l.startsWith('http://') || l.startsWith('https://')) urls.push(l);
   }
   const seen = new Set();
   return urls.filter(u => seen.has(u)?false:(seen.add(u),true));
 }
 
-document.getElementById('loadFile').onclick = ()=>{
-  const f = document.getElementById('fileInput').files[0];
-  if(!f){ alert("Selecciona un archivo primero"); return; }
-  const r = new FileReader();
-  r.onload = e => { document.getElementById('urlsArea').value = e.target.result; };
-  r.readAsText(f,'utf-8');
-};
+/* UI elements */
+const loadFileBtn = document.getElementById('loadFile');
+const fileInput = document.getElementById('fileInput');
+const urlsArea = document.getElementById('urlsArea');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const exportBtn = document.getElementById('exportBtn');
+const clearBtn = document.getElementById('clearBtn');
+const timeMode = document.getElementById('timeMode');
+const customSecs = document.getElementById('customSecs');
+const concurrencyInput = document.getElementById('concurrency');
+const showBothCheckbox = document.getElementById('showBoth');
+const useAllOrigins = document.getElementById('useAllOrigins');
+const useCorsproxy = document.getElementById('useCorsproxy');
+const resultsTableBody = document.querySelector('#resultsTable tbody');
+const summaryEl = document.getElementById('summary');
 
-let stopFlag=false, results=[];
+timeMode.addEventListener('change', ()=>{
+  customSecs.style.display = timeMode.value==='custom' ? 'inline-block' : 'none';
+});
 
-async function checkUrl(u,timeout){
-  const controller = new AbortController();
-  const id = setTimeout(()=>controller.abort(),timeout);
+loadFileBtn.addEventListener('click', ()=>{
+  const f = fileInput.files[0];
+  if(!f){ alert('Selecciona un archivo primero'); return; }
+  const reader = new FileReader();
+  reader.onload = e => { urlsArea.value = e.target.result; };
+  reader.readAsText(f, 'utf-8');
+});
+
+clearBtn.addEventListener('click', ()=>{
+  urlsArea.value=''; resultsTableBody.innerHTML=''; summaryEl.textContent=''; exportBtn.disabled=true;
+});
+
+/* ----------------- Timeout helper ----------------- */
+function withTimeout(promise, ms){
+  return new Promise((resolve, reject)=>{
+    const id = setTimeout(()=>reject(new Error('timeout')), ms);
+    promise.then(v=>{ clearTimeout(id); resolve(v); }).catch(e=>{ clearTimeout(id); reject(e); });
+  });
+}
+
+/* ----------------- Probes ----------------- */
+
+// intenta fetch no-cors (si resuelve -> conexión establecida)
+// Nota: fetch en 'no-cors' no permite leer status, pero si la Promise resuelve hay conexión.
+async function tryDirectFetch(url, timeoutMs){
   try{
-    const res = await fetch(u,{mode:'no-cors',signal:controller.signal});
-    clearTimeout(id);
-    // aunque no tengamos código, si no lanza error, hay conexión
-    return {url:u,ok:true,note:'fetch-ok'};
+    await withTimeout(fetch(url, { method:'GET', mode:'no-cors' }), timeoutMs);
+    return {ok:true, detail:'direct-fetch'};
   }catch(e){
-    clearTimeout(id);
-    // fallback con Image
-    return await new Promise(resolve=>{
-      const img=new Image(); let done=false;
-      const t=setTimeout(()=>{if(!done){done=true;resolve({url:u,ok:false,note:'timeout'});}},timeout);
-      img.onload=()=>{if(!done){done=true;clearTimeout(t);resolve({url:u,ok:true,note:'image-ok'});}};
-      img.onerror=()=>{if(!done){done=true;clearTimeout(t);resolve({url:u,ok:false,note:'image-error'});}};
-      try{ img.src=u+(u.includes('?')?'&':'?')+'_t='+Date.now(); }catch{ resolve({url:u,ok:false,note:'invalid-url'}); }
-    });
+    return {ok:false, detail:'direct-fetch-fail', error:String(e)};
   }
 }
 
-async function startCheck(){
+// fallback por Image (útil si direct fetch falla por CORS)
+function tryImageLoad(url, timeoutMs){
+  return new Promise(resolve=>{
+    const img = new Image();
+    let done=false;
+    const t = setTimeout(()=>{ if(!done){ done=true; resolve({ok:false, detail:'image-timeout'}); } }, timeoutMs);
+    img.onload = ()=>{ if(!done){ done=true; clearTimeout(t); resolve({ok:true, detail:'image-onload'}); } };
+    img.onerror = ()=>{ if(!done){ done=true; clearTimeout(t); resolve({ok:false, detail:'image-error'}); } };
+    try{ img.src = url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now(); } catch(e){ if(!done){ done=true; clearTimeout(t); resolve({ok:false, detail:'image-exc', error:String(e)}); } }
+  });
+}
+
+// Proxy: AllOrigins (intenta obtener status vía su wrapper)
+async function tryAllOrigins(url, timeoutMs){
+  const api = 'https://api.allorigins.win/get?url=' + encodeURIComponent(url);
+  try{
+    const res = await withTimeout(fetch(api, {method:'GET', mode:'cors'}), timeoutMs);
+    if(!res.ok) return {ok:false, detail:'allorigins-proxy-http-'+res.status};
+    const j = await res.json().catch(()=>null);
+    if(j && j.status && typeof j.status.http_code !== 'undefined'){
+      const ok = (j.status.http_code >= 200 && j.status.http_code < 400);
+      return {ok, detail:'allorigins-status', code:j.status.http_code};
+    }
+    // no status provided but contents present -> asumir OK
+    if(j && j.contents) return {ok:true, detail:'allorigins-contents'};
+    return {ok:false, detail:'allorigins-no-status'};
+  }catch(e){
+    return {ok:false, detail:'allorigins-exception', error:String(e)};
+  }
+}
+
+// Proxy: corsproxy.io
+async function tryCorsproxy(url, timeoutMs){
+  const api = 'https://corsproxy.io/?' + encodeURIComponent(url);
+  try{
+    const res = await withTimeout(fetch(api, {method:'GET', mode:'cors'}), timeoutMs);
+    // res.status puede ser el del proxied resource or proxy
+    const ok = (res.status >=200 && res.status < 400);
+    return {ok, detail:'corsproxy', code:res.status};
+  }catch(e){
+    return {ok:false, detail:'corsproxy-exception', error:String(e)};
+  }
+}
+
+/* Heurística para error TLS / certificado:
+   - Si direct (fetch+image) falla y:
+     * original is https AND http version works (image) -> probable error de seguridad (TLS)
+     * además probamos recurso confiable (gstatic image) para descartar fallo red global
+*/
+async function tlsHeuristic(url, timeoutMs){
+  // trusted resource
+  const trusted = 'https://www.gstatic.com/images/branding/product/1x/googleg_32dp.png';
+  const trustedOk = (await tryImageLoad(trusted, Math.min(5000, timeoutMs))).ok;
+
+  let httpOk = false;
+  try{
+    const u = new URL(url);
+    if(u.protocol === 'https:'){
+      const httpUrl = 'http:' + url.slice(6); // https:// -> http://
+      httpOk = (await tryImageLoad(httpUrl, Math.min(7000, timeoutMs))).ok;
+    }
+  }catch(e){ /* ignore */ }
+
+  // Decision rules:
+  if(trustedOk && httpOk) return {suspectTLS:true, note:'posible-error-de-seguridad (https falla, http ok, trusted ok)'};
+  if(trustedOk && !httpOk) return {suspectTLS:false, note:'posible-bloqueo-especifico (trusted ok, http fail)'};
+  if(!trustedOk && httpOk) return {suspectTLS:true, note:'posible-problema-TLS-o-red (trusted fail, http ok)'};
+  if(!trustedOk && !httpOk) return {suspectTLS:false, note:'no-accesible (posible bloqueo/red)'};
+  return {suspectTLS:false, note:'no-accesible'};
+}
+
+/* ----------------- Orquestador single-url ----------------- */
+async function probeOne(url, timeoutMs, proxiesToTry){
+  const start = performance.now();
+  // 1) Direct attempt: fetch (no-cors)
+  const directFetch = await tryDirectFetch(url, timeoutMs);
+  if(directFetch.ok) {
+    const elapsed = Math.round(performance.now()-start);
+    return { url, direct:{ok:true, detail:directFetch.detail}, proxy:{ok:false, detail:'not-run'}, combined:'ACCESIBLE (directo)', note:'direct', time_ms:elapsed };
+  }
+  // 2) Direct image fallback
+  const img = await tryImageLoad(url, timeoutMs);
+  if(img.ok){
+    const elapsed = Math.round(performance.now()-start);
+    return { url, direct:{ok:true, detail:img.detail}, proxy:{ok:false, detail:'not-run'}, combined:'ACCESIBLE (directo image)', note:'direct-image', time_ms:elapsed };
+  }
+
+  // 3) Direct failed: attempt TLS heuristic
+  const tls = await tlsHeuristic(url, timeoutMs);
+
+  // 4) Now attempt proxies if requested (AllOrigins, corsproxy)
+  let proxyResult = {ok:false, detail:'not-tried'};
+  if(proxiesToTry.length){
+    // try in order: AllOrigins then Corsproxy
+    for(const p of proxiesToTry){
+      let r;
+      if(p === 'allorigins') r = await tryAllOrigins(url, timeoutMs);
+      else if(p === 'corsproxy') r = await tryCorsproxy(url, timeoutMs);
+      else continue;
+      if(r.ok){
+        proxyResult = {ok:true, detail:p + ':' + (r.detail||''), code:r.code||0};
+        break;
+      } else {
+        proxyResult = {ok:false, detail:p+':'+(r.detail||'fail')};
+      }
+    }
+  } else {
+    proxyResult = {ok:false, detail:'no-proxy-selected'};
+  }
+
+  const elapsed = Math.round(performance.now()-start);
+
+  // Decide final combined result
+  let combined='NO ACCESIBLE';
+  let note = '';
+  if(proxyResult.ok && directFetch.ok===false && img.ok===false){
+    // accessible through proxy only
+    combined = 'ACCESIBLE (proxy)';
+    note = proxyResult.detail;
+  } else if(proxyResult.ok && (directFetch.ok || img.ok)){
+    combined = 'ACCESIBLE (directo + proxy)';
+    note = proxyResult.detail;
+  } else if((directFetch.ok || img.ok)){
+    combined = 'ACCESIBLE (directo)';
+    note = 'direct';
+  } else {
+    // none worked
+    if(tls.suspectTLS) { combined = 'ERROR DE SEGURIDAD'; note = tls.note; }
+    else { combined = 'NO ACCESIBLE'; note = tls.note; }
+  }
+
+  return { url, direct:{ok:(directFetch.ok||img.ok), detail: directFetch.detail + (img.detail?('/'+img.detail):'')}, proxy:proxyResult, combined, note, time_ms:elapsed };
+}
+
+/* ----------------- Pool / UI runner ----------------- */
+let stopFlag=false;
+let results=[];
+
+async function startRun(){
   stopFlag=false;
   results=[];
-  const raw=document.getElementById('urlsArea').value;
-  const urls=parseLines(raw);
-  const timeout=parseInt(document.getElementById('timeoutMs').value)||10000;
-  let concurrency=parseInt(document.getElementById('concurrency').value)||10;
-  concurrency=Math.min(Math.max(1,concurrency),60);
+  resultsTableBody.innerHTML='';
+  summaryEl.textContent='Iniciando...';
 
-  if(!urls.length){ alert("No hay URLs válidas"); return; }
+  const raw = urlsArea.value;
+  const allUrls = parseLines(raw);
+  if(!allUrls.length){ alert('No se detectaron URLs válidas.'); return; }
 
-  const list=document.getElementById('list');
-  list.innerHTML='';
-  for(const u of urls){
-    const li=document.createElement('li');
-    li.innerHTML=`<div class="url">${u}</div><div class="status small">pendiente</div>`;
-    list.appendChild(li);
-  }
-  const items=[...list.children];
-  const startBtn=document.getElementById('startBtn');
-  const stopBtn=document.getElementById('stopBtn');
-  startBtn.disabled=true; stopBtn.disabled=false;
-  document.getElementById('exportBtn').disabled=true;
-  document.getElementById('summary').textContent='Comprobando...';
+  // timeout selection
+  let timeoutMs = 6000;
+  if(timeMode.value === 'normal') timeoutMs = 6000;
+  else if(timeMode.value === 'advanced') timeoutMs = 15000;
+  else timeoutMs = Math.max(1000, (parseInt(customSecs.value)||10)*1000);
 
-  let i=0;
+  const concurrency = Math.min(60, Math.max(1, parseInt(concurrencyInput.value)||10));
+  const showBoth = showBothCheckbox.checked;
+  const proxies = [];
+  if(useAllOrigins.checked) proxies.push('allorigins');
+  if(useCorsproxy.checked) proxies.push('corsproxy');
+
+  startBtn.disabled=true; stopBtn.disabled=false; exportBtn.disabled=true;
+
+  // prepare table rows
+  allUrls.forEach((u, idx)=>{
+    const tr = document.createElement('tr');
+    tr.id = 'row-' + idx;
+    tr.innerHTML = `<td>${idx+1}</td><td class="url">${u}</td><td class="direct small">—</td><td class="proxy small">—</td><td class="final small">—</td><td class="note small">—</td>`;
+    resultsTableBody.appendChild(tr);
+  });
+
+  let index = 0;
   async function worker(){
     while(true){
       if(stopFlag) break;
-      const idx=i++;
-      if(idx>=urls.length) break;
-      const li=items[idx];
-      const u=urls[idx];
-      const st=li.querySelector('.status');
-      st.textContent='comprobando...';
-      const r=await checkUrl(u,timeout);
-      r.time=new Date().toISOString();
-      results.push(r);
-      if(r.ok){ st.textContent='ACCESIBLE'; st.className='status ok'; }
-      else{ st.textContent='NO ACCESIBLE'; st.className='status fail'; }
-      setSummary();
+      const i = index++;
+      if(i >= allUrls.length) break;
+      const url = allUrls[i];
+      const row = document.getElementById('row-' + i);
+      row.querySelector('.direct').textContent = 'comprobando...';
+      row.querySelector('.proxy').textContent = proxies.length ? 'comprobando...' : 'no seleccionado';
+      row.querySelector('.final').textContent = 'comprobando...';
+      try{
+        const r = await probeOne(url, timeoutMs, proxies);
+        results.push(r);
+        // fill row
+        row.querySelector('.direct').textContent = r.direct.ok ? 'OK' : 'NO';
+        row.querySelector('.proxy').textContent = r.proxy.ok ? 'OK' : (r.proxy.detail || '—');
+        if(showBoth){
+          row.querySelector('.final').textContent = `Directo: ${r.direct.ok?'OK':'NO'}  |  Proxy: ${r.proxy.ok?'OK':'NO'}`;
+        } else {
+          row.querySelector('.final').textContent = r.combined;
+        }
+        // note formatting (highlight security)
+        const noteTd = row.querySelector('.note');
+        noteTd.textContent = r.note + (r.time_ms ? ` (${r.time_ms} ms)`:'');
+        if(r.combined === 'ERROR DE SEGURIDAD') noteTd.className = 'small status sec';
+        else if(r.combined.startsWith('ACCESIBLE')) noteTd.className = 'small status ok';
+        else noteTd.className = 'small status fail';
+      }catch(e){
+        row.querySelector('.final').textContent = 'ERROR';
+        row.querySelector('.note').textContent = String(e);
+      }
+      // update summary
+      const ok = results.filter(x=>x.combined && x.combined.startsWith('ACCESIBLE')).length;
+      const sec = results.filter(x=>x.combined==='ERROR DE SEGURIDAD').length;
+      const no = results.length - ok - sec;
+      summaryEl.textContent = `Comprobadas: ${results.length}/${allUrls.length} — Accesibles: ${ok} — ErrorSeguridad: ${sec} — No accesibles: ${no}`;
     }
   }
 
-  const workers=Array.from({length:concurrency},()=>worker());
+  const workers = Array.from({length:concurrency}, ()=>worker());
   await Promise.all(workers);
-  startBtn.disabled=false; stopBtn.disabled=true;
-  document.getElementById('exportBtn').disabled=results.length===0;
+
+  startBtn.disabled=false; stopBtn.disabled=true; exportBtn.disabled = results.length>0;
+  summaryEl.textContent += ' — Fin.';
 }
 
-function setSummary(){
-  const ok=results.filter(r=>r.ok).length;
-  const fail=results.filter(r=>!r.ok).length;
-  document.getElementById('summary').textContent=`Total: ${results.length} — Accesibles: ${ok} — Bloqueadas: ${fail}`;
-}
-
-document.getElementById('startBtn').onclick=()=>{ startCheck().catch(e=>alert(e)); };
-document.getElementById('stopBtn').onclick=()=>{ stopFlag=true; };
-document.getElementById('clearBtn').onclick=()=>{
-  document.getElementById('urlsArea').value='';
-  document.getElementById('list').innerHTML='';
-  document.getElementById('summary').textContent='';
-  results=[]; document.getElementById('exportBtn').disabled=true;
-};
-document.getElementById('exportBtn').onclick=()=>{
-  if(!results.length) return;
-  const csv=[['url','accesible','nota','timestamp']];
-  for(const r of results) csv.push([r.url,r.ok?'ACCESIBLE':'NO','"'+r.note+'"',r.time]);
-  const blob=new Blob([csv.map(r=>r.join(',')).join('\r\n')],{type:'text/csv'});
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download='wifi_check_results.csv';
+/* ----------------- Controls ----------------- */
+startBtn.addEventListener('click', ()=>{ startRun().catch(e=>alert(e)); });
+stopBtn.addEventListener('click', ()=>{ stopFlag=true; });
+exportBtn.addEventListener('click', ()=>{
+  if(!results.length){ alert('No hay resultados para exportar'); return; }
+  const rows = [['url','direct_ok','proxy_ok','combined','note','time_ms','checked_at']];
+  const ts = new Date().toISOString();
+  for(const r of results) rows.push([r.url, r.direct.ok ? '1':'0', r.proxy.ok ? '1':'0', r.combined, r.note, r.time_ms || '', ts]);
+  const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g,'""')}"`).join(',')).join('\r\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'wifi_check_results.csv';
   a.click();
   URL.revokeObjectURL(a.href);
-};
+});
+
+/* Prevent accidental navigation during run */
+window.addEventListener('beforeunload', (e)=>{
+  if(startBtn.disabled){
+    e.preventDefault();
+    e.returnValue='Hay comprobaciones en curso; ¿seguro que quieres abandonar?';
+  }
+});
 </script>
 
-<footer class="small">
-Funciona totalmente en el navegador. Usa la conexión actual para probar accesibilidad de cada URL.<br>
-Ideal para comprobar filtros o bloqueos en redes públicas (Wi-Fi, hoteles, colegios, etc.).
+<footer class="small" style="margin-top:12px">
+  Notas:
+  <ul>
+    <li>La comprobación directa usa <code>fetch(mode:'no-cors')</code> y fallback con <code>Image()</code>. Eso detecta accesibilidad pero no devuelve códigos HTTP.</li>
+    <li>El proxy AllOrigins puede devolver el código HTTP real cuando lo proporciona; corsproxy intenta reenviar la respuesta.</li>
+    <li>La heurística "ERROR DE SEGURIDAD" es una inferencia (no 100% garantizada) basada en comparar accesibilidad HTTPS/HTTP y un recurso confiable; te ayudará a detectar avisos de certificado.</li>
+  </ul>
 </footer>
 </body>
 </html>
