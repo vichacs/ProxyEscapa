@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Wi-Fi URL Checker (sin proxy)</title>
+<style>
+body{font-family:system-ui,Segoe UI,Roboto,Arial;max-width:1100px;margin:18px auto;padding:12px;}
+textarea{width:100%;height:200px;font-family:monospace;margin-bottom:8px;}
+button{padding:8px 12px;margin-right:8px;}
+input[type=number]{padding:6px;margin-right:8px;width:80px;}
+ul{list-style:none;padding:0;margin:12px 0;}
+li{padding:8px;border-bottom:1px solid #eee;display:flex;align-items:center;gap:12px;}
+.url{flex:1;word-break:break-all;}
+.status.ok{color:green;font-weight:700;}
+.status.fail{color:#d00;font-weight:700;}
+.small{font-size:0.85rem;color:#666;}
+</style>
+</head>
+<body>
+<h2>Comprobador de URLs desde la red local</h2>
+<p class="small">
+Verifica si cada enlace es accesible desde esta Wi-Fi (cafetería, aeropuerto, etc.).
+No usa proxies ni servidores, solo el navegador.  
+El código HTTP exacto no puede obtenerse (limitación de CORS), pero detecta si hay conexión o bloqueo.
+</p>
+
+<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+  <input type="file" id="fileInput" accept=".txt,.csv"/>
+  <button id="loadFile">Cargar archivo</button>
+  <button id="startBtn">Iniciar</button>
+  <button id="stopBtn" disabled>Detener</button>
+  <button id="exportBtn" disabled>Exportar CSV</button>
+  <button id="clearBtn">Limpiar</button>
+  <label class="small">Timeout (ms): <input id="timeoutMs" type="number" value="10000" min="1000" step="500"/></label>
+  <label class="small">Concurrencia: <input id="concurrency" type="number" value="10" min="1" max="60"/></label>
+</div>
+
+<textarea id="urlsArea" placeholder="Pega aquí tus URLs (una por línea) o carga un archivo .txt/.csv"></textarea>
+
+<div id="summary" class="small" style="margin:8px 0;"></div>
+<ul id="list"></ul>
+
+<script>
+function parseLines(text){
+  const urls = [];
+  const lines = text.split(/\r?\n/);
+  for(let l of lines){
+    l = l.trim();
+    if(!l) continue;
+    if(l.includes(',') || l.includes(';')){
+      const p = l.split(/[,;]/)[0].replace(/^"|"$/g,'').trim();
+      if(p.startsWith('http')) urls.push(p);
+    } else if(l.startsWith('http')) urls.push(l);
+  }
+  const seen = new Set();
+  return urls.filter(u => seen.has(u)?false:(seen.add(u),true));
+}
+
+document.getElementById('loadFile').onclick = ()=>{
+  const f = document.getElementById('fileInput').files[0];
+  if(!f){ alert("Selecciona un archivo primero"); return; }
+  const r = new FileReader();
+  r.onload = e => { document.getElementById('urlsArea').value = e.target.result; };
+  r.readAsText(f,'utf-8');
+};
+
+let stopFlag=false, results=[];
+
+async function checkUrl(u,timeout){
+  const controller = new AbortController();
+  const id = setTimeout(()=>controller.abort(),timeout);
+  try{
+    const res = await fetch(u,{mode:'no-cors',signal:controller.signal});
+    clearTimeout(id);
+    // aunque no tengamos código, si no lanza error, hay conexión
+    return {url:u,ok:true,note:'fetch-ok'};
+  }catch(e){
+    clearTimeout(id);
+    // fallback con Image
+    return await new Promise(resolve=>{
+      const img=new Image(); let done=false;
+      const t=setTimeout(()=>{if(!done){done=true;resolve({url:u,ok:false,note:'timeout'});}},timeout);
+      img.onload=()=>{if(!done){done=true;clearTimeout(t);resolve({url:u,ok:true,note:'image-ok'});}};
+      img.onerror=()=>{if(!done){done=true;clearTimeout(t);resolve({url:u,ok:false,note:'image-error'});}};
+      try{ img.src=u+(u.includes('?')?'&':'?')+'_t='+Date.now(); }catch{ resolve({url:u,ok:false,note:'invalid-url'}); }
+    });
+  }
+}
+
+async function startCheck(){
+  stopFlag=false;
+  results=[];
+  const raw=document.getElementById('urlsArea').value;
+  const urls=parseLines(raw);
+  const timeout=parseInt(document.getElementById('timeoutMs').value)||10000;
+  let concurrency=parseInt(document.getElementById('concurrency').value)||10;
+  concurrency=Math.min(Math.max(1,concurrency),60);
+
+  if(!urls.length){ alert("No hay URLs válidas"); return; }
+
+  const list=document.getElementById('list');
+  list.innerHTML='';
+  for(const u of urls){
+    const li=document.createElement('li');
+    li.innerHTML=`<div class="url">${u}</div><div class="status small">pendiente</div>`;
+    list.appendChild(li);
+  }
+  const items=[...list.children];
+  const startBtn=document.getElementById('startBtn');
+  const stopBtn=document.getElementById('stopBtn');
+  startBtn.disabled=true; stopBtn.disabled=false;
+  document.getElementById('exportBtn').disabled=true;
+  document.getElementById('summary').textContent='Comprobando...';
+
+  let i=0;
+  async function worker(){
+    while(true){
+      if(stopFlag) break;
+      const idx=i++;
+      if(idx>=urls.length) break;
+      const li=items[idx];
+      const u=urls[idx];
+      const st=li.querySelector('.status');
+      st.textContent='comprobando...';
+      const r=await checkUrl(u,timeout);
+      r.time=new Date().toISOString();
+      results.push(r);
+      if(r.ok){ st.textContent='ACCESIBLE'; st.className='status ok'; }
+      else{ st.textContent='NO ACCESIBLE'; st.className='status fail'; }
+      setSummary();
+    }
+  }
+
+  const workers=Array.from({length:concurrency},()=>worker());
+  await Promise.all(workers);
+  startBtn.disabled=false; stopBtn.disabled=true;
+  document.getElementById('exportBtn').disabled=results.length===0;
+}
+
+function setSummary(){
+  const ok=results.filter(r=>r.ok).length;
+  const fail=results.filter(r=>!r.ok).length;
+  document.getElementById('summary').textContent=`Total: ${results.length} — Accesibles: ${ok} — Bloqueadas: ${fail}`;
+}
+
+document.getElementById('startBtn').onclick=()=>{ startCheck().catch(e=>alert(e)); };
+document.getElementById('stopBtn').onclick=()=>{ stopFlag=true; };
+document.getElementById('clearBtn').onclick=()=>{
+  document.getElementById('urlsArea').value='';
+  document.getElementById('list').innerHTML='';
+  document.getElementById('summary').textContent='';
+  results=[]; document.getElementById('exportBtn').disabled=true;
+};
+document.getElementById('exportBtn').onclick=()=>{
+  if(!results.length) return;
+  const csv=[['url','accesible','nota','timestamp']];
+  for(const r of results) csv.push([r.url,r.ok?'ACCESIBLE':'NO','"'+r.note+'"',r.time]);
+  const blob=new Blob([csv.map(r=>r.join(',')).join('\r\n')],{type:'text/csv'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='wifi_check_results.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+</script>
+
+<footer class="small">
+Funciona totalmente en el navegador. Usa la conexión actual para probar accesibilidad de cada URL.<br>
+Ideal para comprobar filtros o bloqueos en redes públicas (Wi-Fi, hoteles, colegios, etc.).
+</footer>
+</body>
+</html>
