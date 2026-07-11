@@ -75,16 +75,58 @@
 
 <script>
 /* ----------------- Helpers para parsear / UI ----------------- */
+
+// Lista mínima de TLDs comunes para descartar texto basura que "parece" dominio
+// pero no lo es (ej: "hola.mundo", "archivo.zip", "1.2.3").
+// No es exhaustiva, pero cubre los TLDs más habituales; si el usuario necesita
+// TLDs raros, siempre puede pegar la URL completa con http(s)://.
+const COMMON_TLDS = new Set([
+  'com','org','net','edu','gov','mil','int','info','biz','name','pro',
+  'es','mx','ar','cl','co','pe','ve','uy','py','bo','ec','do','cr','pa','gt','hn','ni','sv','cu','pr',
+  'us','uk','ca','de','fr','it','pt','nl','be','ch','at','se','no','dk','fi','ie','pl','ru','ua',
+  'io','ai','app','dev','xyz','online','site','shop','tech','store','blog','me','tv','cc','co',
+  'jp','cn','kr','in','au','nz','br','za','id','sg','my','ph','th','vn',
+  'gob','edu','name','travel','museum'
+]);
+
+// Regex de forma de dominio: uno o más labels alfanuméricos (con guiones) separados por puntos,
+// terminando en un TLD de 2+ letras, opcionalmente seguido de puerto/ruta/query.
+const DOMAIN_RE = /^(?:www\.)?([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?::\d+)?(?:[\/?#][^\s]*)?$/i;
+
+function looksLikeUrlWithoutScheme(candidate){
+  if(!candidate) return false;
+  if(/\s/.test(candidate)) return false; // texto con espacios no es una URL
+  if(!DOMAIN_RE.test(candidate)) return false;
+  // extraer el TLD (label antes de :puerto o /ruta) para validarlo contra la lista conocida
+  const hostPart = candidate.split(/[\/?#:]/)[0];
+  const labels = hostPart.split('.');
+  const tld = labels[labels.length - 1].toLowerCase();
+  // si empieza con "www." lo aceptamos aunque el TLD no esté en la lista (mayor confianza)
+  if(candidate.toLowerCase().startsWith('www.')) return true;
+  return COMMON_TLDS.has(tld);
+}
+
+// Normaliza un token de texto a una URL con esquema, o null si no es válido/usable.
+function normalizeToUrl(token){
+  let t = token.trim();
+  if(!t) return null;
+  if(t.startsWith('http://') || t.startsWith('https://')) return t;
+  if(looksLikeUrlWithoutScheme(t)) return 'https://' + t;
+  return null;
+}
+
 function parseLines(text){
   const lines = text.split(/\r?\n/);
   const urls = [];
   for(let l of lines){
     l = l.trim();
     if(!l) continue;
+    let candidate = l;
     if(l.includes(',') || l.includes(';')){
-      const p = l.split(/[,;]/)[0].replace(/^"|"$/g,'').trim();
-      if(p && (p.startsWith('http://') || p.startsWith('https://'))) urls.push(p);
-    } else if(l.startsWith('http://') || l.startsWith('https://')) urls.push(l);
+      candidate = l.split(/[,;]/)[0].replace(/^"|"$/g,'').trim();
+    }
+    const normalized = normalizeToUrl(candidate);
+    if(normalized) urls.push(normalized);
   }
   const seen = new Set();
   return urls.filter(u => seen.has(u)?false:(seen.add(u),true));
@@ -393,6 +435,7 @@ window.addEventListener('beforeunload', (e)=>{
     <li>La comprobación directa usa <code>fetch(mode:'no-cors')</code> y fallback con <code>Image()</code>. Eso detecta accesibilidad pero no devuelve códigos HTTP.</li>
     <li>El proxy AllOrigins puede devolver el código HTTP real cuando lo proporciona; corsproxy intenta reenviar la respuesta.</li>
     <li>La heurística "ERROR DE SEGURIDAD" es una inferencia (no 100% garantizada) basada en comparar accesibilidad HTTPS/HTTP y un recurso confiable; te ayudará a detectar avisos de certificado.</li>
+    <li>Detección de URLs: se aceptan líneas con <code>http://</code>, <code>https://</code>, <code>www.dominio.tld</code> o <code>dominio.tld</code> (con un TLD reconocido). Todo lo demás se descarta como texto basura.</li>
   </ul>
 </footer>
 </body>
